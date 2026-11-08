@@ -1,0 +1,50 @@
+name: Mise à jour Littorina
+
+on:
+  schedule:
+    - cron: "7 * * * *"      # toutes les heures à H:07 (évite l'embouteillage de H:00)
+  workflow_dispatch:          # lancement manuel depuis l'onglet Actions
+
+permissions:
+  contents: write
+
+concurrency:
+  group: littorina-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Récupération des données
+        id: fetch
+        continue-on-error: true   # on publie quand même l'état de repli
+        env:
+          PW_TRACKING_URL: ${{ secrets.PW_TRACKING_URL }}
+        run: python -m tracker.run --state data/state.json --strict
+
+      # (étape 4 à venir : génération du PNG à partir de data/state.json)
+
+      - name: Enregistrement de l'état
+        run: |
+          git config user.name  "littorina-bot"
+          git config user.email "littorina-bot@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet || git commit -m "Mise à jour $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
+
+      - name: Alerte si le format PredictWind a changé
+        if: steps.fetch.outcome == 'failure'
+        run: |
+          echo "::error::Récupération en échec (format modifié ?) — voir les logs. L'écran affiche le dernier état valide."
+          exit 1
