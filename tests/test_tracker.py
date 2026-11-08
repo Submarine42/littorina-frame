@@ -125,6 +125,12 @@ class FakeSession:
             if self.pw_down:
                 raise requests.ConnectionError("down")
             return FakeResp(text=self.pw_html)
+        if "nominatim" in url:
+            if self.meteo_down:
+                raise requests.ConnectionError("down")
+            r = FakeResp(js={"address": {"town": "Port-Test", "country": "Testland"}})
+            r.raise_for_status = lambda: None
+            return r
         if self.meteo_down:
             return FakeResp(status=503, text="unavailable")
         if "marine" in url:

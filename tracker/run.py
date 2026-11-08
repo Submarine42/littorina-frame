@@ -23,7 +23,7 @@ from pathlib import Path
 
 import requests
 
-from . import openmeteo, predictwind
+from . import geocode, openmeteo, predictwind, stats
 from .predictwind import Point
 
 SCHEMA_VERSION = 1
@@ -39,6 +39,9 @@ def _empty_state() -> dict:
         "track": {"updated": None, "points": []},
         "live": {},
         "weather": {"forecast": None, "marine": None, "at": None},
+        "stats": {},
+        "places": {},   # cache du géocodage inverse des escales
+
         "sources": {
             "predictwind": {"status": "never", "last_attempt": None, "last_success": None, "error": None},
             "forecast": {"status": "never", "last_attempt": None, "last_success": None, "error": None},
@@ -125,6 +128,26 @@ def update_weather(state: dict, session: requests.Session, now: int, force: bool
     state["weather"]["at"] = [last.lat, last.lon]
 
 
+def update_stats(state: dict, session: requests.Session, now: int) -> None:
+    """Stats ludiques + noms d'escales. Une erreur ici ne doit jamais bloquer le reste."""
+    pts = state["track"]["points"]
+    if len(pts) < 2:
+        return
+    try:
+        s = stats.compute(pts, now)
+    except Exception as e:  # garde-fou : on garde les stats précédentes
+        print(f"stats : échec du calcul ({e!r}), stats précédentes conservées", file=sys.stderr)
+        return
+    coords = [(s["departure"]["lat"], s["departure"]["lon"])]
+    coords += [(x["lat"], x["lon"]) for x in s.get("stops", [])]
+    if s.get("current_stop"):
+        coords.append((s["current_stop"]["lat"], s["current_stop"]["lon"]))
+    # escale en cours d'abord, puis les plus récentes
+    n = geocode.resolve(state.setdefault("places", {}), list(reversed(coords)), session)
+    state["stats"] = s
+    state["sources"].setdefault("geocode", {})["last_requests"] = n
+
+
 def mark_staleness(state: dict, now: int) -> None:
     upd = state["track"]["updated"]
     state["track"]["age_s"] = None if upd is None else now - upd
@@ -148,12 +171,13 @@ def main(argv: list[str] | None = None) -> int:
     with requests.Session() as session:
         format_changed = update_track(state, url, session, now, args.force)
         update_weather(state, session, now, args.force)
+        update_stats(state, session, now)
     mark_staleness(state, now)
     state["generated_at"] = now
     save_state(args.state, state)
 
     for name, src in state["sources"].items():
-        print(f"{name:12s} {src['status']:15s} {src.get('error') or ''}")
+        print(f"{name:12s} {src.get('status', '-'):15s} {src.get('error') or ''}")
     print(f"points: {len(state['track']['points'])}  âge position: {state['track']['age_s']} s")
 
     return 3 if (format_changed and args.strict) else 0

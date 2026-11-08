@@ -2,11 +2,13 @@ name: Mise à jour Littorina
 
 on:
   schedule:
-    - cron: "7 * * * *"      # toutes les heures à H:07 (évite l'embouteillage de H:00)
+    - cron: "7 * * * *"      # toutes les heures à H:07 (le cadre se réveille vers H:20-H:25)
   workflow_dispatch:          # lancement manuel depuis l'onglet Actions
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: littorina-update
@@ -15,7 +17,10 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,14 +31,34 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      - name: Cache du navigateur de rendu
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - run: python -m playwright install --with-deps chromium
+
       - name: Récupération des données
         id: fetch
-        continue-on-error: true   # on publie quand même l'état de repli
+        continue-on-error: true   # on rend et on publie quand même l'état de repli
         env:
           PW_TRACKING_URL: ${{ secrets.PW_TRACKING_URL }}
         run: python -m tracker.run --state data/state.json --strict
 
-      # (étape 4 à venir : génération du PNG à partir de data/state.json)
+      - name: Rendu de l'image
+        id: render
+        continue-on-error: true   # un rendu raté laisse l'image précédente en ligne
+        run: |
+          python -m tracker.render --state data/state.json --out public
+          new=$(sha256sum public/frame.png | cut -d' ' -f1)
+          old=$(cat data/frame.sha256 2>/dev/null || true)
+          if [ "$new" != "$old" ]; then
+            echo "$new" > data/frame.sha256
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Enregistrement de l'état
         run: |
@@ -43,8 +68,20 @@ jobs:
           git diff --cached --quiet || git commit -m "Mise à jour $(date -u +%Y-%m-%dT%H:%MZ)"
           git push
 
-      - name: Alerte si le format PredictWind a changé
-        if: steps.fetch.outcome == 'failure'
+      # Publication uniquement si l'image a changé : sinon l'ETag reste le même et le
+      # cadre ne rafraîchit pas inutilement sa dalle.
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.render.outcome == 'success' && steps.render.outputs.changed == 'true'
+        with:
+          path: public
+
+      - id: deploy
+        if: steps.render.outcome == 'success' && steps.render.outputs.changed == 'true'
+        uses: actions/deploy-pages@v4
+
+      - name: Alertes
+        if: steps.fetch.outcome == 'failure' || steps.render.outcome == 'failure'
         run: |
-          echo "::error::Récupération en échec (format modifié ?) — voir les logs. L'écran affiche le dernier état valide."
+          [ "${{ steps.fetch.outcome }}" = "failure" ] && echo "::error::Récupération en échec (format PredictWind modifié ?). Le cadre affiche le dernier état valide."
+          [ "${{ steps.render.outcome }}" = "failure" ] && echo "::error::Rendu en échec. L'image précédente reste en ligne."
           exit 1

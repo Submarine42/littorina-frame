@@ -50,9 +50,14 @@ def fetch_forecast(lat: float, lon: float, session: requests.Session, timeout: f
         "latitude": lat, "longitude": lon,
         "current": ",".join(FORECAST_VARS),
         "wind_speed_unit": "kn", "timezone": "auto",
+        "daily": "sunrise,sunset", "forecast_days": 1,
     }, session, timeout)
     c = d["current"]
+    daily = d.get("daily") if isinstance(d.get("daily"), dict) else {}
+    first = lambda k: (daily.get(k) or [None])[0]  # noqa: E731
     return {
+        "sunrise": first("sunrise"),   # heure locale à bord, ISO « 2026-11-09T06:05 »
+        "sunset": first("sunset"),
         "time_utc_offset_s": d.get("utc_offset_seconds"),
         "timezone": d.get("timezone"),
         "timezone_abbr": d.get("timezone_abbreviation"),
